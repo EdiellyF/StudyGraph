@@ -1,0 +1,10 @@
+# Ignore environment files
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Node dependencies and build outputs
+node_modules/
+dist/
