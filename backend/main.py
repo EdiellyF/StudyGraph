@@ -52,6 +52,9 @@ class UserCreate(BaseModel):
     name: str = Field(..., min_length=1)
     email: EmailStr
     password: str = Field(..., min_length=6)
+    semester: Optional[str] = None
+    institution: Optional[str] = None
+    course: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -65,6 +68,21 @@ class UserProfileUpdate(BaseModel):
     course: Optional[str]
     semester: Optional[str]
     bio: Optional[str]
+
+
+class PostCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class PostResponse(BaseModel):
+    id: str
+    content: str
+    authorId: str
+    authorName: str
+    authorAvatar: Optional[str]
+    likesCount: int
+    commentsCount: int
+    createdAt: str
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -166,3 +184,146 @@ async def read_profile(user_id: str):
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     return user_response(user)
+
+
+@app.post("/posts", status_code=status.HTTP_201_CREATED)
+async def create_post(post: PostCreate, current_user: dict = Depends(get_current_user)):
+    post_dict = post.model_dump()
+    post_dict["authorId"] = str(current_user["_id"])
+    post_dict["authorName"] = current_user.get("name")
+    post_dict["authorAvatar"] = current_user.get("avatarUrl")
+    post_dict["likesCount"] = 0
+    post_dict["commentsCount"] = 0
+    post_dict["createdAt"] = datetime.utcnow().isoformat()
+
+    result = await db.posts.insert_one(post_dict)
+    created_post = await db.posts.find_one({"_id": result.inserted_id})
+
+    return {
+        "id": str(created_post["_id"]),
+        "content": created_post["content"],
+        "authorId": created_post["authorId"],
+        "authorName": created_post["authorName"],
+        "authorAvatar": created_post.get("authorAvatar"),
+        "likesCount": created_post["likesCount"],
+        "commentsCount": created_post["commentsCount"],
+        "createdAt": created_post["createdAt"],
+    }
+
+
+@app.get("/posts")
+async def get_posts(current_user: dict = Depends(get_current_user), user_id: Optional[str] = None, limit: int = 20, skip: int = 0):
+    filter_query = {}
+    if user_id:
+        filter_query["authorId"] = user_id
+    
+    cursor = db.posts.find(filter_query).sort("createdAt", -1).skip(skip).limit(limit)
+    posts = await cursor.to_list(length=limit)
+
+    return [
+        {
+            "id": str(post["_id"]),
+            "content": post["content"],
+            "authorId": post["authorId"],
+            "authorName": post["authorName"],
+            "authorAvatar": post.get("authorAvatar"),
+            "likesCount": post["likesCount"],
+            "commentsCount": post["commentsCount"],
+            "createdAt": post["createdAt"],
+        }
+        for post in posts
+    ]
+
+
+@app.get("/users/suggested")
+async def get_suggested_users(current_user: dict = Depends(get_current_user), limit: int = 5):
+    cursor = db.users.find({"_id": {"$ne": current_user["_id"]}}).limit(limit)
+    users = await cursor.to_list(length=limit)
+
+    return [
+        {
+            "id": str(user["_id"]),
+            "name": user.get("name"),
+            "institution": user.get("institution"),
+            "course": user.get("course"),
+            "avatarUrl": user.get("avatarUrl"),
+            "followersCount": user.get("followersCount", 0),
+        }
+        for user in users
+    ]
+
+
+@app.post("/users/{user_id}/follow", status_code=status.HTTP_200_OK)
+async def follow_user(user_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="ID de usuário inválido")
+    
+    if user_id == str(current_user["_id"]):
+        raise HTTPException(status_code=400, detail="Você não pode seguir a si mesmo")
+    
+    user_to_follow = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not user_to_follow:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    
+    # Verifica se já segue
+    existing_follow = await db.follows.find_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    if existing_follow:
+        raise HTTPException(status_code=400, detail="Você já está seguindo este usuário")
+    
+    # Cria relacionamento de follow
+    await db.follows.insert_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id,
+        "createdAt": datetime.utcnow().isoformat()
+    })
+    
+    # Atualiza contadores
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$inc": {"followersCount": 1}}
+    )
+    await db.users.update_one(
+        {"_id": current_user["_id"]},
+        {"$inc": {"followingCount": 1}}
+    )
+    
+    return {"message": "Usuário seguido com sucesso"}
+
+
+@app.delete("/users/{user_id}/follow", status_code=status.HTTP_200_OK)
+async def unfollow_user(user_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="ID de usuário inválido")
+    
+    user_to_unfollow = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not user_to_unfollow:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    
+    # Verifica se segue
+    existing_follow = await db.follows.find_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    if not existing_follow:
+        raise HTTPException(status_code=400, detail="Você não está seguindo este usuário")
+    
+    # Remove relacionamento de follow
+    await db.follows.delete_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    
+    # Atualiza contadores
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$inc": {"followersCount": -1}}
+    )
+    await db.users.update_one(
+        {"_id": current_user["_id"]},
+        {"$inc": {"followingCount": -1}}
+    )
+    
+    return {"message": "Usuário deixado de seguir com sucesso"}

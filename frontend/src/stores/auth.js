@@ -38,7 +38,6 @@ export const useAuthStore = defineStore('auth', () => {
     const data = await response.json()
     saveToken(data.access_token)
     await fetchProfile()
-    router.push('/profile')
     return true
   }
 
