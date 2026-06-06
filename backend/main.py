@@ -212,8 +212,12 @@ async def create_post(post: PostCreate, current_user: dict = Depends(get_current
 
 
 @app.get("/posts")
-async def get_posts(current_user: dict = Depends(get_current_user), limit: int = 20, skip: int = 0):
-    cursor = db.posts.find().sort("createdAt", -1).skip(skip).limit(limit)
+async def get_posts(current_user: dict = Depends(get_current_user), user_id: Optional[str] = None, limit: int = 20, skip: int = 0):
+    filter_query = {}
+    if user_id:
+        filter_query["authorId"] = user_id
+    
+    cursor = db.posts.find(filter_query).sort("createdAt", -1).skip(skip).limit(limit)
     posts = await cursor.to_list(length=limit)
 
     return [
@@ -247,3 +251,79 @@ async def get_suggested_users(current_user: dict = Depends(get_current_user), li
         }
         for user in users
     ]
+
+
+@app.post("/users/{user_id}/follow", status_code=status.HTTP_200_OK)
+async def follow_user(user_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="ID de usuário inválido")
+    
+    if user_id == str(current_user["_id"]):
+        raise HTTPException(status_code=400, detail="Você não pode seguir a si mesmo")
+    
+    user_to_follow = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not user_to_follow:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    
+    # Verifica se já segue
+    existing_follow = await db.follows.find_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    if existing_follow:
+        raise HTTPException(status_code=400, detail="Você já está seguindo este usuário")
+    
+    # Cria relacionamento de follow
+    await db.follows.insert_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id,
+        "createdAt": datetime.utcnow().isoformat()
+    })
+    
+    # Atualiza contadores
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$inc": {"followersCount": 1}}
+    )
+    await db.users.update_one(
+        {"_id": current_user["_id"]},
+        {"$inc": {"followingCount": 1}}
+    )
+    
+    return {"message": "Usuário seguido com sucesso"}
+
+
+@app.delete("/users/{user_id}/follow", status_code=status.HTTP_200_OK)
+async def unfollow_user(user_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="ID de usuário inválido")
+    
+    user_to_unfollow = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not user_to_unfollow:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    
+    # Verifica se segue
+    existing_follow = await db.follows.find_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    if not existing_follow:
+        raise HTTPException(status_code=400, detail="Você não está seguindo este usuário")
+    
+    # Remove relacionamento de follow
+    await db.follows.delete_one({
+        "followerId": str(current_user["_id"]),
+        "followingId": user_id
+    })
+    
+    # Atualiza contadores
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$inc": {"followersCount": -1}}
+    )
+    await db.users.update_one(
+        {"_id": current_user["_id"]},
+        {"$inc": {"followingCount": -1}}
+    )
+    
+    return {"message": "Usuário deixado de seguir com sucesso"}

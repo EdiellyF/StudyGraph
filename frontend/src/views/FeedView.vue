@@ -100,7 +100,10 @@
               <p class="font-medium text-sm text-slate-700 truncate">{{ user.name }}</p>
               <p class="text-xs text-slate-400 truncate">{{ user.institution }}</p>
             </div>
-            <button class="px-3 py-1 rounded-full border border-wine text-wine text-sm hover:bg-wine hover:text-white transition">
+            <button 
+              @click="followUser(user.id)"
+              class="px-3 py-1 rounded-full border border-wine text-wine text-sm hover:bg-wine hover:text-white transition"
+            >
               Seguir
             </button>
           </div>
@@ -132,7 +135,7 @@ async function submitPost() {
 async function fetchSuggestedUsers() {
   try {
     const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
-    const response = await fetch(`${API_BASE}/users/suggested`, {
+    const response = await fetch(`${API_BASE}/users/suggestions`, {
       headers: { Authorization: `Bearer ${auth.token}` },
     })
     
@@ -141,6 +144,23 @@ async function fetchSuggestedUsers() {
     }
   } catch (error) {
     console.error('Error fetching suggested users:', error)
+  }
+}
+
+async function followUser(userId) {
+  try {
+    const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+    const response = await fetch(`${API_BASE}/users/${userId}/follow`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${auth.token}` },
+    })
+
+    if (response.ok) {
+      // Remove user from suggestions
+      suggestedUsers.value = suggestedUsers.value.filter(u => u.id !== userId)
+    }
+  } catch (error) {
+    console.error('Error following user:', error)
   }
 }
 

@@ -21,30 +21,58 @@
         <div class="space-y-4">
           <label class="block">
             <span class="text-sm text-slate-700">Nome completo</span>
-            <input v-model="form.name" type="text" required class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" placeholder="Seu nome" />
+            <input 
+              v-model="form.name" 
+              type="text" 
+              required 
+              class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" 
+              placeholder="Seu nome"
+            />
           </label>
 
           <label class="block">
             <span class="text-sm text-slate-700">Semestre</span>
-            <select v-model="form.semester" required class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva bg-white">
+            <select 
+              v-model="form.semester" 
+              required 
+              class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva bg-white"
+            >
               <option value="">Selecione o semestre</option>
-              <option v-for="i in 12" :key="i" :value="i">{{ i }}º semestre</option>
+              <option v-for="i in 12" :key="i" :value="String(i)">{{ i }}º semestre</option>
             </select>
           </label>
 
           <label class="block">
             <span class="text-sm text-slate-700">E-mail institucional</span>
-            <input v-model="form.email" type="email" required class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" placeholder="seu.email@instituicao.br" />
+            <input 
+              v-model="form.email" 
+              type="email" 
+              required 
+              class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" 
+              placeholder="seu.email@instituicao.br"
+            />
           </label>
 
           <label class="block">
             <span class="text-sm text-slate-700">Instituição</span>
-            <input v-model="form.institution" type="text" required class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" placeholder="Nome da sua instituição" />
+            <input 
+              v-model="form.institution" 
+              type="text" 
+              required 
+              class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" 
+              placeholder="Nome da sua instituição"
+            />
           </label>
 
           <label class="block">
             <span class="text-sm text-slate-700">Curso</span>
-            <input v-model="form.course" type="text" required class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" placeholder="Seu curso" />
+            <input 
+              v-model="form.course" 
+              type="text" 
+              required 
+              class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" 
+              placeholder="Seu curso"
+            />
           </label>
 
           <label class="block">
@@ -53,7 +81,6 @@
               v-model="form.password" 
               type="password" 
               required 
-              minlength="6" 
               @input="checkPasswordStrength"
               class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-malva" 
               placeholder="Mínimo 6 caracteres"
@@ -67,7 +94,9 @@
           </label>
         </div>
 
-        <p v-if="auth.error" class="mt-4 text-sm text-red-600">{{ auth.error }}</p>
+        <div v-if="auth.error" class="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm">
+          {{ auth.error }}
+        </div>
 
         <button 
           type="submit" 
@@ -142,8 +171,6 @@ async function submitForm() {
     institution: form.institution,
     course: form.course
   })
-  if (success) {
-    router.push('/feed')
-  }
+  if (success) router.push('/feed')
 }
 </script>

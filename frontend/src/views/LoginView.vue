@@ -1,9 +1,9 @@
 <template>
   <div>
-    <AuthForm />
+    <LoginForm />
   </div>
 </template>
 
 <script setup>
-import AuthForm from '../components/AuthForm.vue'
+import LoginForm from '../components/LoginForm.vue'
 </script>
