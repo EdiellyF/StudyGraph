@@ -30,7 +30,7 @@ const form = reactive({ email: '', password: '' })
 async function submitForm() {
   const success = await auth.login({ email: form.email, password: form.password })
   if (success) {
-    router.push('/profile')
+    router.push('/feed')
   }
 }
 </script>
