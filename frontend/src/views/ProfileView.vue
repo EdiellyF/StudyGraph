@@ -119,20 +119,48 @@
                 <span class="text-slate-400 text-sm">{{ formatDate(post.createdAt) }}</span>
               </div>
               <p class="text-slate-700 whitespace-pre-wrap mb-4">{{ post.content }}</p>
+              <div v-if="post.images && post.images.length > 0" class="grid gap-2 mb-4" :class="post.images.length === 1 ? 'grid-cols-1' : 'grid-cols-2'">
+                <img
+                  v-for="(img, idx) in post.images"
+                  :key="idx"
+                  :src="img"
+                  class="rounded-lg w-full h-auto object-cover max-h-96"
+                  alt="Post image"
+                />
+              </div>
               <div class="flex items-center gap-6 text-slate-500">
-                <button class="flex items-center gap-2 hover:text-wine transition">
-                  <span>❤️</span>
+                <button
+                  @click="toggleLike(post.id)"
+                  :class="[
+                    'flex items-center gap-2 transition',
+                    likedPosts.has(post.id) ? 'text-wine' : 'hover:text-wine'
+                  ]"
+                >
+                  <span>{{ likedPosts.has(post.id) ? '❤️' : '🤍' }}</span>
                   <span>{{ post.likesCount || 0 }}</span>
                 </button>
                 <button class="flex items-center gap-2 hover:text-wine transition">
                   <span>💬</span>
                   <span>{{ post.commentsCount || 0 }}</span>
                 </button>
-                <button class="flex items-center gap-2 hover:text-wine transition">
-                  <span>🔖</span>
+                <button
+                  @click="toggleSave(post.id)"
+                  :class="[
+                    'flex items-center gap-2 transition',
+                    savedPosts.has(post.id) ? 'text-wine' : 'hover:text-wine'
+                  ]"
+                >
+                  <span>{{ savedPosts.has(post.id) ? '🔖' : '🔗' }}</span>
                 </button>
               </div>
             </div>
+            <button
+              v-if="isOwnProfile"
+              @click="deletePost(post.id)"
+              class="text-slate-400 hover:text-red-500 transition"
+            >
+              ✕
+            </button>
           </div>
         </div>
       </div>
@@ -162,6 +190,8 @@ const editingBio = ref('')
 const savingBio = ref(false)
 const followLoading = ref(false)
 const isFollowing = ref(false)
+const likedPosts = ref(new Set())
+const savedPosts = ref(new Set())
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
@@ -191,8 +221,14 @@ async function fetchProfileData() {
   try {
     loadingProfile.value = true
     
-    // Get profile data
-    const profileResponse = await fetch(`${API_BASE}/profile/me`, {
+    let profileUrl = `${API_BASE}/profile/me`
+    
+    // Se houver userId na rota, buscar perfil de outro usuário
+    if (route.params.userId) {
+      profileUrl = `${API_BASE}/profile/${route.params.userId}`
+    }
+    
+    const profileResponse = await fetch(profileUrl, {
       headers: { Authorization: `Bearer ${auth.token}` },
     })
     
@@ -211,8 +247,9 @@ async function fetchUserPosts() {
   try {
     loadingPosts.value = true
     
-    // Get user's posts
-    const postsResponse = await fetch(`${API_BASE}/posts?user_id=${profileUser.value.id}`, {
+    const userId = route.params.userId || auth.user?.id
+    
+    const postsResponse = await fetch(`${API_BASE}/posts?user_id=${userId}`, {
       headers: { Authorization: `Bearer ${auth.token}` },
     })
     
@@ -273,6 +310,83 @@ async function toggleFollow() {
     console.error('Error toggling follow:', error)
   } finally {
     followLoading.value = false
+  }
+}
+
+async function toggleLike(postId) {
+  try {
+    if (likedPosts.value.has(postId)) {
+      // Unlike
+      const response = await fetch(`${API_BASE}/posts/${postId}/like`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${auth.token}` },
+      })
+      
+      if (response.ok) {
+        likedPosts.value.delete(postId)
+        const post = userPosts.value.find(p => p.id === postId)
+        if (post) post.likesCount--
+      }
+    } else {
+      // Like
+      const response = await fetch(`${API_BASE}/posts/${postId}/like`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${auth.token}` },
+      })
+      
+      if (response.ok) {
+        likedPosts.value.add(postId)
+        const post = userPosts.value.find(p => p.id === postId)
+        if (post) post.likesCount++
+      }
+    }
+  } catch (error) {
+    console.error('Error toggling like:', error)
+  }
+}
+
+async function toggleSave(postId) {
+  try {
+    if (savedPosts.value.has(postId)) {
+      // Unsave
+      const response = await fetch(`${API_BASE}/posts/${postId}/save`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${auth.token}` },
+      })
+      
+      if (response.ok) {
+        savedPosts.value.delete(postId)
+      }
+    } else {
+      // Save
+      const response = await fetch(`${API_BASE}/posts/${postId}/save`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${auth.token}` },
+      })
+      
+      if (response.ok) {
+        savedPosts.value.add(postId)
+      }
+    }
+  } catch (error) {
+    console.error('Error toggling save:', error)
+  }
+}
+
+async function deletePost(postId) {
+  if (!confirm('Tem certeza que deseja deletar este post?')) return
+  
+  try {
+    const response = await fetch(`${API_BASE}/posts/${postId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${auth.token}` },
+    })
+    
+    if (response.ok) {
+      userPosts.value = userPosts.value.filter(p => p.id !== postId)
+    }
+  } catch (error) {
+    console.error('Error deleting post:', error)
   }
 }
 

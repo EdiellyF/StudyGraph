@@ -30,7 +30,7 @@ export const usePostsStore = defineStore('posts', () => {
     }
   }
 
-  async function createPost(content, token) {
+  async function createPost(content, images = [], token) {
     loading.value = true
     error.value = null
 
@@ -41,11 +41,12 @@ export const usePostsStore = defineStore('posts', () => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, images }),
       })
 
       if (!response.ok) {
-        throw new Error('Falha ao criar post')
+        const errorData = await response.json()
+        throw new Error(errorData.detail || 'Falha ao criar post')
       }
 
       const newPost = await response.json()

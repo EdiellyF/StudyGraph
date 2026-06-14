@@ -1,16 +1,19 @@
 from datetime import datetime, timedelta
 import os
-from typing import Optional
+from typing import Optional, List
+import base64
+from io import BytesIO
 
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 import jwt
+from PIL import Image
 
 load_dotenv()
 
@@ -34,7 +37,7 @@ db = client[MONGO_DB]
 @app.on_event("startup")
 async def ensure_collections():
     existing = await db.list_collection_names()
-    for collection_name in ["users", "posts", "follows"]:
+    for collection_name in ["users", "posts", "follows", "likes", "comments", "notifications", "saved_posts"]:
         if collection_name not in existing:
             await db.create_collection(collection_name)
 
@@ -72,6 +75,7 @@ class UserProfileUpdate(BaseModel):
 
 class PostCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=2000)
+    images: Optional[List[str]] = Field(None, description="Lista de imagens em base64")
 
 
 class PostResponse(BaseModel):
@@ -80,8 +84,22 @@ class PostResponse(BaseModel):
     authorId: str
     authorName: str
     authorAvatar: Optional[str]
+    images: Optional[List[str]] = None
     likesCount: int
     commentsCount: int
+    createdAt: str
+
+
+class CommentCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=500)
+
+
+class CommentResponse(BaseModel):
+    id: str
+    content: str
+    authorId: str
+    authorName: str
+    authorAvatar: Optional[str]
     createdAt: str
 
 
@@ -170,6 +188,41 @@ async def update_my_profile(update: UserProfileUpdate, current_user: dict = Depe
     return user_response(updated)
 
 
+@app.post("/profile/me/avatar")
+async def upload_avatar(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """Upload de avatar do usuário. Máximo 2MB, formatos: PNG, JPG, JPEG."""
+    # Valida tipo de arquivo
+    allowed_types = {"image/png", "image/jpeg", "image/jpg"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Formato de arquivo não permitido. Use PNG ou JPEG.")
+    
+    # Lê o arquivo
+    contents = await file.read()
+    
+    # Verifica tamanho (máximo 2MB)
+    if len(contents) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Arquivo excede o tamanho máximo de 2MB")
+    
+    try:
+        # Converte para base64
+        avatar_base64 = base64.b64encode(contents).decode('utf-8')
+        avatar_data_url = f"data:{file.content_type};base64,{avatar_base64}"
+        
+        # Comprime imagem
+        compressed_avatar = validate_and_compress_image(avatar_data_url)
+        
+        # Atualiza usuário
+        await db.users.update_one(
+            {"_id": ObjectId(current_user["_id"])},
+            {"$set": {"avatarUrl": compressed_avatar}}
+        )
+        
+        updated = await db.users.find_one({"_id": ObjectId(current_user["_id"])})
+        return user_response(updated)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao processar avatar: {str(e)}")
+
+
 @app.delete("/profile/me", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_my_profile(current_user: dict = Depends(get_current_user)):
     await db.users.delete_one({"_id": ObjectId(current_user["_id"])})
@@ -186,6 +239,33 @@ async def read_profile(user_id: str):
     return user_response(user)
 
 
+@app.get("/users/search")
+async def search_users(q: str, current_user: dict = Depends(get_current_user), limit: int = 10):
+    if not q or len(q) < 2:
+        raise HTTPException(status_code=400, detail="Query deve ter pelo menos 2 caracteres")
+    
+    cursor = db.users.find({
+        "$or": [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"institution": {"$regex": q, "$options": "i"}},
+            {"course": {"$regex": q, "$options": "i"}}
+        ]
+    }).limit(limit)
+    
+    users = await cursor.to_list(length=limit)
+    
+    return [
+        {
+            "id": str(user["_id"]),
+            "name": user.get("name"),
+            "institution": user.get("institution"),
+            "course": user.get("course"),
+            "followersCount": user.get("followersCount", 0),
+        }
+        for user in users
+    ]
+
+
 @app.post("/posts", status_code=status.HTTP_201_CREATED)
 async def create_post(post: PostCreate, current_user: dict = Depends(get_current_user)):
     post_dict = post.model_dump()
@@ -195,6 +275,19 @@ async def create_post(post: PostCreate, current_user: dict = Depends(get_current
     post_dict["likesCount"] = 0
     post_dict["commentsCount"] = 0
     post_dict["createdAt"] = datetime.utcnow().isoformat()
+    
+    # Processa imagens se fornecidas
+    if post_dict.get("images"):
+        processed_images = []
+        for img in post_dict["images"][:4]:  # Máximo 4 imagens
+            try:
+                compressed_img = validate_and_compress_image(img)
+                processed_images.append(compressed_img)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        post_dict["images"] = processed_images
+    else:
+        post_dict["images"] = []
 
     result = await db.posts.insert_one(post_dict)
     created_post = await db.posts.find_one({"_id": result.inserted_id})
@@ -205,6 +298,7 @@ async def create_post(post: PostCreate, current_user: dict = Depends(get_current
         "authorId": created_post["authorId"],
         "authorName": created_post["authorName"],
         "authorAvatar": created_post.get("authorAvatar"),
+        "images": created_post.get("images", []),
         "likesCount": created_post["likesCount"],
         "commentsCount": created_post["commentsCount"],
         "createdAt": created_post["createdAt"],
@@ -227,6 +321,248 @@ async def get_posts(current_user: dict = Depends(get_current_user), user_id: Opt
             "authorId": post["authorId"],
             "authorName": post["authorName"],
             "authorAvatar": post.get("authorAvatar"),
+            "images": post.get("images", []),
+            "likesCount": post["likesCount"],
+            "commentsCount": post["commentsCount"],
+            "createdAt": post["createdAt"],
+        }
+        for post in posts
+    ]
+
+
+@app.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    if post["authorId"] != str(current_user["_id"]):
+        raise HTTPException(status_code=403, detail="Você não tem permissão para deletar este post")
+    
+    await db.posts.delete_one({"_id": ObjectId(post_id)})
+    await db.likes.delete_many({"postId": post_id})
+    await db.comments.delete_many({"postId": post_id})
+    return
+
+
+@app.post("/posts/{post_id}/like", status_code=status.HTTP_200_OK)
+async def like_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    # Verifica se já curtiu
+    existing_like = await db.likes.find_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"])
+    })
+    
+    if existing_like:
+        raise HTTPException(status_code=400, detail="Você já curtiu este post")
+    
+    # Adiciona like
+    await db.likes.insert_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"]),
+        "createdAt": datetime.utcnow().isoformat()
+    })
+    
+    # Incrementa contador
+    await db.posts.update_one(
+        {"_id": ObjectId(post_id)},
+        {"$inc": {"likesCount": 1}}
+    )
+    
+    return {"message": "Post curtido com sucesso"}
+
+
+@app.delete("/posts/{post_id}/like", status_code=status.HTTP_200_OK)
+async def unlike_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    # Verifica se curtiu
+    existing_like = await db.likes.find_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"])
+    })
+    
+    if not existing_like:
+        raise HTTPException(status_code=400, detail="Você não curtiu este post")
+    
+    # Remove like
+    await db.likes.delete_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"])
+    })
+    
+    # Decrementa contador
+    await db.posts.update_one(
+        {"_id": ObjectId(post_id)},
+        {"$inc": {"likesCount": -1}}
+    )
+    
+    return {"message": "Like removido com sucesso"}
+
+
+@app.post("/posts/{post_id}/comments", status_code=status.HTTP_201_CREATED)
+async def create_comment(post_id: str, comment: CommentCreate, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    comment_dict = {
+        "postId": post_id,
+        "authorId": str(current_user["_id"]),
+        "authorName": current_user.get("name"),
+        "authorAvatar": current_user.get("avatarUrl"),
+        "content": comment.content,
+        "createdAt": datetime.utcnow().isoformat()
+    }
+    
+    result = await db.comments.insert_one(comment_dict)
+    
+    # Incrementa contador
+    await db.posts.update_one(
+        {"_id": ObjectId(post_id)},
+        {"$inc": {"commentsCount": 1}}
+    )
+    
+    return {
+        "id": str(result.inserted_id),
+        "content": comment_dict["content"],
+        "authorId": comment_dict["authorId"],
+        "authorName": comment_dict["authorName"],
+        "authorAvatar": comment_dict.get("authorAvatar"),
+        "createdAt": comment_dict["createdAt"]
+    }
+
+
+@app.get("/posts/{post_id}/comments")
+async def get_comments(post_id: str, current_user: dict = Depends(get_current_user), limit: int = 20, skip: int = 0):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    cursor = db.comments.find({"postId": post_id}).sort("createdAt", -1).skip(skip).limit(limit)
+    comments = await cursor.to_list(length=limit)
+    
+    return [
+        {
+            "id": str(comment["_id"]),
+            "content": comment["content"],
+            "authorId": comment["authorId"],
+            "authorName": comment["authorName"],
+            "authorAvatar": comment.get("authorAvatar"),
+            "createdAt": comment["createdAt"]
+        }
+        for comment in comments
+    ]
+
+
+@app.delete("/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_comment(comment_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(comment_id):
+        raise HTTPException(status_code=400, detail="ID de comentário inválido")
+    
+    comment = await db.comments.find_one({"_id": ObjectId(comment_id)})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comentário não encontrado")
+    
+    if comment["authorId"] != str(current_user["_id"]):
+        raise HTTPException(status_code=403, detail="Você não tem permissão para deletar este comentário")
+    
+    await db.comments.delete_one({"_id": ObjectId(comment_id)})
+    
+    # Decrementa contador
+    await db.posts.update_one(
+        {"_id": ObjectId(comment["postId"])},
+        {"$inc": {"commentsCount": -1}}
+    )
+    return
+
+
+@app.post("/posts/{post_id}/save", status_code=status.HTTP_200_OK)
+async def save_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    post = await db.posts.find_one({"_id": ObjectId(post_id)})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    
+    # Verifica se já salvou
+    existing_save = await db.saved_posts.find_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"])
+    })
+    
+    if existing_save:
+        raise HTTPException(status_code=400, detail="Você já salvou este post")
+    
+    # Salva post
+    await db.saved_posts.insert_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"]),
+        "createdAt": datetime.utcnow().isoformat()
+    })
+    
+    return {"message": "Post salvo com sucesso"}
+
+
+@app.delete("/posts/{post_id}/save", status_code=status.HTTP_200_OK)
+async def unsave_post(post_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(post_id):
+        raise HTTPException(status_code=400, detail="ID de post inválido")
+    
+    # Remove save
+    result = await db.saved_posts.delete_one({
+        "postId": post_id,
+        "userId": str(current_user["_id"])
+    })
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=400, detail="Você não salvou este post")
+    
+    return {"message": "Post removido dos salvos"}
+
+
+@app.get("/saved-posts")
+async def get_saved_posts(current_user: dict = Depends(get_current_user), limit: int = 20, skip: int = 0):
+    # Busca IDs dos posts salvos
+    saved_cursor = db.saved_posts.find({"userId": str(current_user["_id"])}).sort("createdAt", -1).skip(skip).limit(limit)
+    saved = await saved_cursor.to_list(length=limit)
+    
+    post_ids = [ObjectId(s["postId"]) for s in saved]
+    
+    # Busca os posts
+    posts_cursor = db.posts.find({"_id": {"$in": post_ids}})
+    posts = await posts_cursor.to_list(length=limit)
+    
+    return [
+        {
+            "id": str(post["_id"]),
+            "content": post["content"],
+            "authorId": post["authorId"],
+            "authorName": post["authorName"],
+            "authorAvatar": post.get("authorAvatar"),
+            "images": post.get("images", []),
             "likesCount": post["likesCount"],
             "commentsCount": post["commentsCount"],
             "createdAt": post["createdAt"],
@@ -327,3 +663,75 @@ async def unfollow_user(user_id: str, current_user: dict = Depends(get_current_u
     )
     
     return {"message": "Usuário deixado de seguir com sucesso"}
+
+
+@app.get("/notifications")
+async def get_notifications(current_user: dict = Depends(get_current_user), limit: int = 20, skip: int = 0):
+    cursor = db.notifications.find({"userId": str(current_user["_id"])}).sort("createdAt", -1).skip(skip).limit(limit)
+    notifications = await cursor.to_list(length=limit)
+    
+    return [
+        {
+            "id": str(notif["_id"]),
+            "type": notif.get("type"),
+            "message": notif.get("message"),
+            "fromUserId": notif.get("fromUserId"),
+            "fromUserName": notif.get("fromUserName"),
+            "postId": notif.get("postId"),
+            "read": notif.get("read", False),
+            "createdAt": notif.get("createdAt")
+        }
+        for notif in notifications
+    ]
+
+
+@app.put("/notifications/{notification_id}/read", status_code=status.HTTP_200_OK)
+async def mark_notification_read(notification_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(notification_id):
+        raise HTTPException(status_code=400, detail="ID de notificação inválido")
+    
+    await db.notifications.update_one(
+        {"_id": ObjectId(notification_id)},
+        {"$set": {"read": True}}
+    )
+    
+    return {"message": "Notificação marcada como lida"}
+
+
+def validate_and_compress_image(image_base64: str, max_size_mb: float = 2.0) -> str:
+    """Valida e comprime imagem em base64. Retorna a imagem comprimida em base64."""
+    try:
+        # Remove prefixo data:image se existir
+        if image_base64.startswith('data:image'):
+            image_base64 = image_base64.split(',')[1]
+        
+        # Decodifica base64
+        image_data = base64.b64decode(image_base64)
+        
+        # Verifica tamanho máximo
+        max_size_bytes = max_size_mb * 1024 * 1024
+        if len(image_data) > max_size_bytes:
+            raise ValueError(f"Imagem excede o tamanho máximo de {max_size_mb}MB")
+        
+        # Abre imagem com PIL
+        image = Image.open(BytesIO(image_data))
+        
+        # Converte para RGB se necessário
+        if image.mode in ('RGBA', 'LA', 'P'):
+            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+            rgb_image.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+            image = rgb_image
+        
+        # Redimensiona se muito grande (máximo 1920x1920)
+        max_dimension = 1920
+        if image.width > max_dimension or image.height > max_dimension:
+            image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+        
+        # Comprime e salva em base64
+        output = BytesIO()
+        image.save(output, format='JPEG', quality=85, optimize=True)
+        compressed_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
+        
+        return f"data:image/jpeg;base64,{compressed_base64}"
+    except Exception as e:
+        raise ValueError(f"Erro ao processar imagem: {str(e)}")
